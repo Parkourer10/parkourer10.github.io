@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PrinterFlow</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="icon.webp">
+
+<style>
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: 'Inter', sans-serif;
+  background-color: #0d0d0d;
+  color: #eee;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 20px;
+}
+h1 {
+  font-size: 52px;
+  font-weight: 700;
+  margin: 10px 0 5px 0;
+  letter-spacing: 1px;
+}
+p {
+  font-size: 16px;
+  color: #bbb;
+  text-align: center;
+  margin: 5px 0 20px 0;
+}
+textarea {
+  width: 100%;
+  height: 100px;
+  resize: vertical;
+}
+button {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+button:hover {
+  background: #1a1a1a;
+}
+.panel {
+  width: 90%;
+  max-width: 700px;
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+pre {
+  background: white;
+  border: 1px solid #222;
+  padding: 10px;
+  height: 220px;
+  overflow-y: auto;
+  font-size: 14px;
+  white-space: pre-wrap;
+  border-radius: 6px;
+  color: #111; /* dark text */
+}
+
+</style>
+</head>
+<body>
+<h1>PrinterFlow</h1>
+<p>Connect your 3D Printer <span style="color:red;">(currently only supports </span><span style="color:aqua;">Marlin</span><span style="color:red;">)</span></p>
+
+<p>
+  Port:
+  <select id="port"><option>Select USB</option></select>
+  Baud:
+  <select id="baud">
+    <option>1200</option>
+    <option>1800</option>
+    <option>2400</option>
+    <option>4800</option>
+    <option>9600</option>
+    <option>19200</option>
+    <option>28800</option>
+    <option>38400</option>
+    <option>57600</option>
+    <option>76800</option>
+    <option selected>115200</option>
+    <option>230400</option>
+    <option>460800</option>
+    <option>576000</option>
+    <option>921600</option>
+  </select>
+  <button id="connect">Connect</button>
+</p>
+
+<div class="panel">
+  <h2>Send G-code</h2>
+  <textarea id="gcodeInput" placeholder="Enter G-code"></textarea>
+  <button id="sendGcode">Send</button>
+</div>
+
+<div class="panel" style="margin-bottom: 90px;">
+  <h2>Input G-code File</h2>
+  <input type="file" id="gcodeFile" accept=".gcode,.gc"> 
+</div>
+
+<div class="panel">
+  <h2>Serial Log:</h2>
+  <pre id="log"></pre>
+</div>
+
+
+<script>
+let port = null;
+let reader = null;
+let writer = null;
+let busy = false;
+let logBuffer = "";
+
+function log(msg, type="printer") {
+  const el = document.getElementById("log");
+  const prefix = type === "user" ? "You: " : "Printer: ";
+  el.textContent += prefix + msg + "\n";
+  el.scrollTop = el.scrollHeight;
+}
+//this website wont work in firefox bc it doesnt support web serial api
+document.getElementById("port").addEventListener("mousedown", async e => {
+  e.preventDefault();
+  if (!("serial" in navigator)) { alert("Please use google chrome or microsoft edge or any chromium browser"); return; }
+  try {
+    port = await navigator.serial.requestPort();
+    document.getElementById("port").innerHTML = "<option selected>USB Device</option>";
+  } catch(e) {
+    log("Port selection cancelled");
+  }
+});
+
+document.getElementById("connect").onclick = async () => {
+  if (!port) { alert("No USB selected"); return; }
+  const baud = parseInt(document.getElementById("baud").value);
+  try {
+    await port.open({ baudRate: baud });
+    const decoder = new TextDecoderStream();
+    port.readable.pipeTo(decoder.writable);
+    reader = decoder.readable.getReader();
+    const encoder = new TextEncoderStream();
+    encoder.readable.pipeTo(port.writable);
+    writer = encoder.writable.getWriter();
+    log("Connected at " + baud + " baud");
+    port.addEventListener("disconnect", () => {
+      log("Device disconnected!");
+      reader = null;
+      writer = null;
+      port = null;
+    });
+  } catch(e) {
+    log("Connection failed: " + e);
+  }
+};
+// thanks google
+async function readUntilOk() {
+  if (!reader) throw new Error("Not connected");
+  while (true) {
+    try {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      logBuffer += value;
+      let lines = logBuffer.split(/\r?\n/);
+      logBuffer = lines.pop() || "";
+      for (let line of lines) {
+        line = line.trim();
+        if (!line) continue;
+        if (!/[\x20-\x7E]/.test(line)) continue;
+        if (line.startsWith("echo:")) line = line.replace(/^echo:\s*/, "");
+        log(line, "printer");
+        if (line.startsWith("ok")) return;
+      }
+    } catch(e) {
+      log("Read error: " + e);
+      return;
+    }
+  }
+}
+
+document.getElementById("sendGcode").onclick = async () => {
+  if (!writer || busy) { alert("Not connected or busy"); return; }
+  const gcodeText = document.getElementById("gcodeInput").value.trim();
+  if (!gcodeText) return;
+  const lines = gcodeText.split("\n").map(l => l.trim()).filter(l => l);
+  busy = true;
+  try {
+    for (let line of lines) {
+      log(line, "user");
+      await writer.write(line + "\n");
+      await readUntilOk();
+    }
+  } catch(e) {
+    log("Write error: " + e);
+  } finally { busy = false; }
+};
+
+document.getElementById("gcodeFile").addEventListener("change", async e => {
+  if (!writer || busy) { alert("Not connected or busy"); return; }
+  const file = e.target.files[0];
+  if (!file) return;
+  const text = await file.text();
+  const lines = text.split("\n").map(l => l.trim()).filter(l => l && !l.startsWith(";"));
+  busy = true;
+  try {
+    for (let line of lines) {
+      log(line, "user");
+      await writer.write(line + "\n");
+      await readUntilOk();
+    }
+    log("File completed!", "printer");
+  } catch(e) {
+    log("File write error: " + e);
+  } finally { busy = false; }
+});
+</script>
+</body>
+</html>
